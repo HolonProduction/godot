@@ -129,6 +129,8 @@ public:
 	void lsp_did_change(const Dictionary &p_params);
 	void lsp_did_close(const Dictionary &p_params);
 
+	void publish_dependent_diagnostics(const String &p_path);
+
 	/**
 	 * Returns parse results for the given path, using the cache if available.
 	 * If no such file exists, or the file is not a GDScript file a `nullptr` is returned.

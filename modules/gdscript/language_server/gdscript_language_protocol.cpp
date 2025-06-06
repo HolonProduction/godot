@@ -468,6 +468,23 @@ void GDScriptLanguageProtocol::lsp_did_close(const Dictionary &p_params) {
 	ERR_FAIL_COND_MSG(!was_opened, "LSP: Client is closing file without opening it.");
 }
 
+void GDScriptLanguageProtocol::publish_dependent_diagnostics(const String &p_path) {
+	LSP_CLIENT;
+	for (const KeyValue<String, LSP::TextDocumentItem> &client_managed : client->managed_files) {
+		ExtendGDScriptParser **cached_parser = client->parse_results.getptr(client_managed.key);
+		if (cached_parser != nullptr && (*cached_parser)->parse_result == Error::OK) {
+			// Parse result is valid, only recalculate if script depends on p_path.
+			if ((*cached_parser)->get_depended_parsers().has(p_path)) {
+				client->parse_script(client_managed.key);
+				continue;
+			}
+		} else {
+			// No valid parse result. The change at `p_path` might change that.
+			client->parse_script(client_managed.key);
+		}
+	}
+}
+
 GDScriptLanguageProtocol::LSPeer::~LSPeer() {
 	while (!parse_results.is_empty()) {
 		remove_cached_parser(parse_results.begin()->key);

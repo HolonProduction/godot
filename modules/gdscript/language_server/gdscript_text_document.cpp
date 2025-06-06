@@ -31,6 +31,7 @@
 #include "gdscript_text_document.h"
 
 #include "../gdscript.h"
+#include "editor/editor_file_system.h"
 #include "gdscript_extend_parser.h"
 #include "gdscript_language_protocol.h"
 
@@ -90,6 +91,8 @@ void GDScriptTextDocument::didSave(const Variant &p_param) {
 	String text = dict["text"];
 
 	String path = GDScriptLanguageProtocol::get_singleton()->get_workspace()->get_file_path(doc.uri);
+	EditorFileSystem::get_singleton()->update_file(path);
+
 	Ref<GDScript> scr = ResourceLoader::load(path);
 	if (scr.is_valid() && (scr->load_source_code(path) == OK)) {
 		if (scr->is_tool()) {
@@ -106,6 +109,8 @@ void GDScriptTextDocument::didSave(const Variant &p_param) {
 			reload_script(scr);
 		}
 	}
+
+	GDScriptLanguageProtocol::get_singleton()->publish_dependent_diagnostics(path);
 }
 
 void GDScriptTextDocument::reload_script(Ref<GDScript> p_to_reload_script) {
