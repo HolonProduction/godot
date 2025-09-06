@@ -36,6 +36,7 @@
 #include "editor/editor_log.h"
 #include "editor/editor_node.h"
 #include "editor/settings/editor_settings.h"
+#include "scene/resources/packed_scene.h"
 
 GDScriptLanguageProtocol *GDScriptLanguageProtocol::singleton = nullptr;
 
@@ -134,6 +135,9 @@ Error GDScriptLanguageProtocol::on_client_connected() {
 
 void GDScriptLanguageProtocol::on_client_disconnected(const int &p_client_id) {
 	clients.erase(p_client_id);
+	if (clients.size() == 0) {
+		scene_cache.clear();
+	}
 	EditorNode::get_log()->add_message("[LSP] Disconnected", EditorLog::MSG_TYPE_EDITOR);
 }
 
@@ -256,6 +260,8 @@ void GDScriptLanguageProtocol::poll(int p_limit_usec) {
 		on_client_connected();
 	}
 
+	scene_cache.poll();
+
 	HashMap<int, Ref<LSPeer>>::Iterator E = clients.begin();
 	while (E != clients.end()) {
 		Ref<LSPeer> peer = E->value;
@@ -301,7 +307,7 @@ void GDScriptLanguageProtocol::stop() {
 		Ref<LSPeer> peer = clients.get(E.key);
 		peer->connection->disconnect_from_host();
 	}
-
+	scene_cache.clear();
 	server->stop();
 }
 
@@ -403,3 +409,178 @@ GDScriptLanguageProtocol::GDScriptLanguageProtocol() {
 #undef SET_DOCUMENT_METHOD
 #undef SET_COMPLETION_METHOD
 #undef SET_WORKSPACE_METHOD
+
+//-------------------
+
+void SceneCache::_get_owners(EditorFileSystemDirectory *p_dir, const String &p_path, LocalVector<String> &r_owners) {
+	if (!p_dir) {
+		return;
+	}
+
+	for (int i = 0; i < p_dir->get_subdir_count(); i++) {
+		_get_owners(p_dir->get_subdir(i), p_path, r_owners);
+	}
+
+	for (int i = 0; i < p_dir->get_file_count(); i++) {
+		if (p_dir->get_file_deps(i).has(p_path)) {
+			r_owners.push_back(p_dir->get_file_path(i));
+		}
+	}
+}
+
+void SceneCache::_pop_resource(Node *p_result) {
+	ERR_FAIL_COND(resource_queue.is_empty());
+	ERR_FAIL_COND(cache.has(resource_queue[0]));
+
+	cache[resource_queue[0]] = p_result;
+
+#ifdef DEBUG_LSP
+	if (p_result == nullptr) {
+		print_line("LSP: SceneCache cached nullptr for", resource_queue[0]);
+	} else {
+		print_line("LSP: SceneCache added owner instance for", resource_queue[0]);
+	}
+#endif
+
+	owner_queue.clear();
+	resource_queue.remove_at(0);
+	if (!resource_queue.is_empty()) {
+		_get_owners(EditorFileSystem::get_singleton()->get_filesystem(), resource_queue[0], owner_queue);
+	}
+}
+
+void SceneCache::_load_step() {
+	while (!resource_queue.is_empty()) {
+		if (owner_queue.is_empty()) {
+			_pop_resource(nullptr);
+		} else {
+			Error err = ResourceLoader::load_threaded_request(owner_queue[0]);
+			if (err == OK) {
+				return; // Suspend the loading loop. `poll` will restart it once the background load finished.
+			}
+			owner_queue.remove_at(0);
+		}
+	}
+}
+
+void SceneCache::_finish_load() {
+	ERR_FAIL_COND(resource_queue.is_empty() || owner_queue.is_empty());
+
+	Ref<PackedScene> owner_res = ResourceLoader::load_threaded_get(owner_queue[0]);
+
+	if (owner_res.is_valid()) {
+		_pop_resource(owner_res->instantiate());
+	} else {
+		owner_queue.remove_at(0);
+	}
+}
+
+void SceneCache::poll() {
+	if (owner_queue.is_empty()) {
+		return;
+	}
+	ERR_FAIL_COND_MSG(resource_queue.is_empty(), "LSP: Illegal SceneCache state: resource_queue is empty but owner_queue is not.");
+
+	ResourceLoader::ThreadLoadStatus status = ResourceLoader::load_threaded_get_status(owner_queue[0]);
+	if (status == ResourceLoader::THREAD_LOAD_IN_PROGRESS) {
+		return;
+	}
+
+	if (status == ResourceLoader::THREAD_LOAD_LOADED) {
+		_finish_load();
+	} else {
+		owner_queue.remove_at(0);
+	}
+
+	_load_step();
+}
+
+Node *SceneCache::get(const String &p_path) {
+	if (!cache.has(p_path)) {
+#ifdef DEBUG_LSP
+		print_line("LSP: SceneCache blocking thread to load requested uncached owner:", p_path);
+#endif
+		queue(p_path);
+
+		if (!resource_queue.is_empty() && resource_queue[0] != p_path) {
+			resource_queue.erase(p_path);
+			// Move requested path to next position but keep position 0 so it can gracefully finish loading.
+			resource_queue.insert(1, p_path);
+		}
+
+		while (!cache.has(p_path)) {
+			_finish_load();
+			_load_step();
+		}
+	}
+
+	Node **res = cache.getptr(p_path);
+	ERR_FAIL_COND_V(res == nullptr, nullptr);
+	return *res;
+}
+
+void SceneCache::queue(const String &p_path) {
+	if (cache.has(p_path) || resource_queue.has(p_path)) {
+		return;
+	}
+
+	resource_queue.push_back(p_path);
+
+#ifdef DEBUG_LSP
+	print_line("LSP: SceneCache load queued for:", p_path, "(Queue size:", resource_queue.size(), ")");
+#endif
+
+	if (resource_queue.size() == 1) {
+		_get_owners(EditorFileSystem::get_singleton()->get_filesystem(), resource_queue[0], owner_queue);
+		_load_step();
+	}
+}
+
+void SceneCache::erase(const String &p_path) {
+	if (!resource_queue.is_empty() && resource_queue[0] == p_path) {
+		ERR_FAIL_COND(cache.has(p_path));
+
+		while (!cache.has(p_path)) {
+			_finish_load();
+			_load_step();
+		}
+	}
+
+	resource_queue.erase(p_path);
+
+	if (!cache.has(p_path)) {
+		return;
+	}
+	memdelete_notnull(cache[p_path]);
+	cache.erase(p_path);
+
+#ifdef DEBUG_LSP
+	print_line("LSP: SceneCache cleared for path:", p_path);
+#endif
+}
+
+void SceneCache::clear() {
+	if (resource_queue.size() > 1) {
+		String head = resource_queue[0];
+		resource_queue.clear();
+		resource_queue.push_back(head);
+	}
+	if (owner_queue.size() > 1) {
+		String head = owner_queue[0];
+		owner_queue.clear();
+		owner_queue.push_back(head);
+	}
+
+	while (!resource_queue.is_empty()) {
+		_finish_load();
+		_load_step();
+	}
+
+	for (const KeyValue<String, Node *> &E : cache) {
+		memdelete_notnull(E.value)
+	}
+	cache.clear();
+#ifdef DEBUG_LSP
+	print_line("LSP: SceneCache cleared.");
+#endif
+}

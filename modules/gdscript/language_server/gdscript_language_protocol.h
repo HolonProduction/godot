@@ -35,11 +35,48 @@
 
 #include "core/io/stream_peer_tcp.h"
 #include "core/io/tcp_server.h"
+#include "editor/file_system/editor_file_system.h"
 
 #include "modules/jsonrpc/jsonrpc.h"
 
 #define LSP_MAX_BUFFER_SIZE 4194304
 #define LSP_MAX_CLIENTS 8
+
+// Enables more verbose logging in some parts of the language server.
+// #define DEBUG_LSP
+
+/**
+ * Used to load and cache scenes for autocompletion.
+ *
+ * Resources are loaded sequentially in the background to prevent threading edge cases.
+ * The current implementation is not thread save.
+ */
+class SceneCache {
+private:
+	HashMap<String, Node *> cache;
+	LocalVector<String> resource_queue;
+	LocalVector<String> owner_queue; // Potential owners of the current head of the resource queue. First successful load wins.
+
+	void _get_owners(EditorFileSystemDirectory *p_dir, const String &p_path, LocalVector<String> &r_owners);
+
+	/** Runs the loading loop till either the queues are empty or a background load is required. */
+	void _load_step();
+
+	/** Finishes loading of the owner_queue head, blocking if necessary. Requires manual restart of the loading loop afterwards. */
+	void _finish_load();
+
+	/** Adds a result for the head of the resource queue */
+	void _pop_resource(Node *p_result);
+
+public:
+	/** Checks whether a background load finished and restarts the loading loop accordingly. */
+	void poll();
+
+	Node *get(const String &p_path);
+	void queue(const String &p_path);
+	void erase(const String &p_path);
+	void clear();
+};
 
 class GDScriptLanguageProtocol : public JSONRPC {
 	GDCLASS(GDScriptLanguageProtocol, JSONRPC)
@@ -68,6 +105,7 @@ private:
 	static GDScriptLanguageProtocol *singleton;
 
 	HashMap<int, Ref<LSPeer>> clients;
+	SceneCache scene_cache;
 	Ref<TCPServer> server;
 	int latest_client_id = 0;
 	int next_client_id = 0;
@@ -95,6 +133,8 @@ public:
 	_FORCE_INLINE_ static GDScriptLanguageProtocol *get_singleton() { return singleton; }
 	_FORCE_INLINE_ Ref<GDScriptWorkspace> get_workspace() { return workspace; }
 	_FORCE_INLINE_ Ref<GDScriptTextDocument> get_text_document() { return text_document; }
+	_FORCE_INLINE_ SceneCache *get_scene_cache() { return &scene_cache; }
+
 	_FORCE_INLINE_ bool is_initialized() const { return _initialized; }
 
 	void poll(int p_limit_usec);
