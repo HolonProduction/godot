@@ -53,7 +53,8 @@
  */
 class SceneCache {
 private:
-	HashMap<String, Node *> cache;
+	HashMap<String, Node *> owner_cache; // owner path -> instance
+	HashMap<String, Node *> resource_cache; // script path -> instance
 	LocalVector<String> resource_queue;
 	LocalVector<String> owner_queue; // Potential owners of the current head of the resource queue. First successful load wins.
 

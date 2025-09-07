@@ -430,9 +430,13 @@ void SceneCache::_get_owners(EditorFileSystemDirectory *p_dir, const String &p_p
 
 void SceneCache::_pop_resource(Node *p_result) {
 	ERR_FAIL_COND(resource_queue.is_empty());
-	ERR_FAIL_COND(cache.has(resource_queue[0]));
+	ERR_FAIL_COND(resource_cache.has(resource_queue[0]));
 
-	cache[resource_queue[0]] = p_result;
+	resource_cache[resource_queue[0]] = p_result;
+
+	if (!owner_queue.is_empty() && !owner_cache.has(owner_queue[0])) {
+		owner_cache[owner_queue[0]] = p_result;
+	}
 
 #ifdef DEBUG_LSP
 	if (p_result == nullptr) {
