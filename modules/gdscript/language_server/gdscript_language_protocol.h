@@ -51,6 +51,12 @@ class GDScriptLanguageProtocol : public JSONRPC {
 	friend class TestGDScriptLanguageProtocolInitializer;
 #endif
 
+public:
+	struct ClientBehavior {
+		/** If `true` use snippet insert mode to position the cursor between braces of completion options. If `false` strip braces from completion options since we can't provide good UX for them. */
+		bool use_snippets_for_brace_completion = false;
+	};
+
 private:
 	struct LSPeer : RefCounted {
 		Ref<StreamPeerTCP> connection;
@@ -65,6 +71,12 @@ private:
 
 		Error handle_data();
 		Error send_data();
+
+		/**
+		 * Represents how the server should behave towards this client in certain situations.
+		 * This gets derived from client capabilities so the configured behavior is guaranteed to be supported by the client.
+		 */
+		ClientBehavior behavior;
 
 		/**
 		 * Tracks all files that the client claimed, however for files deemed not relevant
@@ -114,7 +126,7 @@ private:
 protected:
 	static void _bind_methods();
 
-	Dictionary initialize(const Dictionary &p_params);
+	Variant initialize(const Dictionary &p_params);
 	void initialized(const Variant &p_params);
 
 public:
@@ -139,6 +151,9 @@ public:
 	void lsp_did_open(const Dictionary &p_params);
 	void lsp_did_change(const Dictionary &p_params);
 	void lsp_did_close(const Dictionary &p_params);
+
+	// Completion
+	Array lsp_completion(const Dictionary &p_params);
 
 	/**
 	 * Returns a list of symbols that might be related to the document position.
